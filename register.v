@@ -25,7 +25,7 @@ module register #(
     //   - Dacă resetul nu este activ (rst = 1) ȘI enable-ul este activ (en = 1),
     //     atunci ieșirea q preia valoarea intrării d.
     //   - Altfel, q își menține valoarea anterioară (dacă nu e reset).
-    always @(negedge clk or negedge rst) begin
+    always @(posedge clk or negedge rst) begin
         if (!rst) begin // Reset asincron, activ pe LOW
             q <= {WIDTH{1'b0}}; // Setează toți biții la 0
         end else if (en) begin // Actualizare sincronă pe frontul negativ al ceasului, dacă enable este activ
