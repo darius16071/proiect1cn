@@ -1,67 +1,68 @@
-
 //-----------------------------------------------------
 // Modul SRT Radix-2 Divider (8/8 bit -> 8 bit Q, 8 bit R, Unsigned)
-// Implementează împărțirea folosind o logică similară Non-Restoring.
-// Folosește Q+/Q- și necesită corecție finală rest + scădere finală Q.
-// Multi-ciclu (8 pași + corecție + scădere).
+// Implementare Non-Restoring.
+// Autor: [Numele Tau/AI]
+// Data: [Data Curenta]
 //-----------------------------------------------------
 module srt_radix2_divider_8bit (
     input  wire       clk,
-    input  wire       reset,
+    input  wire       reset,          // Reset activ pe HIGH
     input  wire       start,          // Semnal de pornire
     input  wire [7:0] dividend,       // Deîmpărțit (A) - unsigned
     input  wire [7:0] divisor,        // Împărțitor (B) - unsigned
     output reg  [7:0] quotient,       // Câtul final (Q) - unsigned
     output reg  [7:0] remainder,      // Restul final (R) - unsigned
     output reg        busy,           // Indicator de ocupat
-    output reg        div_by_zero     // Flag eroare împărțire la zero
+    output wire       div_by_zero_flag // Flag eroare împărțire la zero
 );
 
-    // State machine states
+    // Parametri pentru stările mașinii de stări
     parameter IDLE        = 2'b00;
-    parameter DIVIDING    = 2'b01;
-    parameter CORRECTION  = 2'b10; // Corecție rest + Scădere Q
-    parameter FINISHED    = 2'b11; // Stat intermediar pt a seta busy=0
+    parameter INIT        = 2'b01;
+    parameter DIVIDING    = 2'b10;
+    parameter CORRECTION  = 2'b11;
 
-    reg [1:0] current_state, next_state;
+    // Registre pentru mașina de stări
+    reg [1:0] current_state;
+    reg [1:0] next_state;
 
-    // Registre interne
-    reg signed [8:0] p_reg;         // Rest parțial (P), 9 biți pentru 2P+/-B
-    reg [7:0]        b_reg;         // Împărțitor (B)
-    reg [7:0]        dividend_sreg; // Registru de shift pentru Dividend (A)
-    reg [7:0]        q_pos_reg;     // Registru pentru biții q= +1
-    reg [7:0]        q_neg_reg;     // Registru pentru biții q= -1
-    reg [3:0]        count;         // Numărător pași (de la 8 la 0)
-    reg              rem_correction_needed; // Flag: restul final P este negativ
-    reg [7:0]        final_rem_buffer; // Buffer pt restul (posibil corectat)
+    // Registre interne pentru algoritmul de împărțire
+    reg signed [8:0] p_reg;          // Restul parțial P (N+1 biți)
+    reg [7:0]        b_reg;          // Împărțitorul B (N biți)
+    reg [7:0]        q_temp_reg;     // Registru temporar pentru construirea câtului Q
+    reg [3:0]        count;          // Contor pentru numărul de iterații (N iterații)
 
-reg signed [8:0] final_p_candidate;
+    // Registru intern pentru flag-ul de împărțire la zero
+    reg internal_div_by_zero_reg;
 
-    // Fire interne pentru operații
-    wire signed [8:0] b_extended    = {1'b0, b_reg};       // B extins la 9 biți
-    wire signed [8:0] neg_b_extended = -b_extended;      // -B pe 9 biți
-    wire signed [8:0] p_shifted     = {p_reg[7:0], dividend_sreg[7]}; // P << 1 + bit A
-    wire signed [8:0] p_plus_b      = p_shifted + b_extended;
-    wire signed [8:0] p_minus_b     = p_shifted - b_extended;
+    // Împărțitorul B extins la N+1 biți, cu semn (dar va fi mereu pozitiv aici)
+    // {1'b0, b_reg} asigură că este tratat ca pozitiv dacă b_reg este unsigned.
+    wire signed [8:0] b_extended_signed = {1'b0, b_reg};
 
-    // Fire pentru noul bit de cât (forma Q+/Q-)
-    reg q_pos_next_bit;
-    reg q_neg_next_bit;
+    // Variabile intermediare (registre pentru logica combinationala)
+    // Acestea vor fi conduse de logica combinatională în blocul `always @(*)`
+    // și folosite ca intrări pentru actualizarea registrelor secvențiale.
+    reg signed [8:0] p_next_val;     // Valoarea viitoare a lui p_reg
+    reg              q_bit_next_val; // Următorul bit al câtului
 
-    // Instanțiere subtractor intern pentru Q = Qpos - Qneg
-    wire [7:0] final_quotient_internal;
-    wire       q_sub_c_flag, q_sub_v_flag; // Ignorate
+    // Fire intermediare pentru calculul pe 10 biți (N+2 biți) al lui 2P +/- B
+    // Acest lucru previne overflow-ul la dublarea lui p_reg.
+    wire signed [9:0] p_current_extended_10b; // p_reg extins la 10 biți
+    wire signed [9:0] p_doubled_10b;          // 2 * p_reg (pe 10 biți)
+    wire signed [9:0] b_for_calc_10b;         // b_extended_signed extins la 10 biți
+    
+    // Registru intermediar pentru rezultatul operației 2P +/- B pe 10 biți.
+    // Acest registru este condus de logica combinatională.
+    reg signed [9:0] op_result_10b;
 
-    adder_subtractor_8bit q_subtractor (
-        .a(q_pos_reg),
-        .b(q_neg_reg),
-        .subtract(1'b1), // Efectuează scădere
-        .result(final_quotient_internal),
-        .c_flag(q_sub_c_flag), // Ignorat
-        .v_flag(q_sub_v_flag)  // Ignorat
-    );
 
-    // State machine logic: Current state register
+    // --- Asignări Continue ---
+    assign div_by_zero_flag       = internal_div_by_zero_reg;
+    assign p_current_extended_10b = p_reg; // Extensie cu semn de la 9 la 10 biți
+    assign p_doubled_10b          = p_current_extended_10b << 1; // Calculează 2*P pe 10 biți
+    assign b_for_calc_10b         = b_extended_signed; // Extensie cu semn de la 9 la 10 biți
+
+    // --- Mașina de Stări - Registrul de Stare (Secvențial) ---
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             current_state <= IDLE;
@@ -70,155 +71,136 @@ reg signed [8:0] final_p_candidate;
         end
     end
 
-    // State machine logic: Next state and output logic
+    // --- Mașina de Stări - Logica Stării Următoare și Ieșirea 'busy' (Combinational) ---
     always @(*) begin
-        // Valori implicite (păstrează starea/valorile dacă nu se specifică altfel)
-        next_state = current_state;
-        busy = (current_state != IDLE); // Busy în toate stările, cu excepția IDLE
-        div_by_zero = 1'b0; // Reset implicit
+        // Valori implicite pentru a evita latch-uri și a defini comportamentul standard
+        next_state = current_state; 
+        busy       = (current_state != IDLE); // Ocupat în orice stare, cu excepția IDLE
 
-        // Comportament bazat pe starea curentă
         case (current_state)
             IDLE: begin
-                busy = 1'b0; // Nu suntem ocupați
+                // busy este setat la 0 automat de condiția de mai sus
                 if (start) begin
                     if (divisor == 8'b0) begin
-                        div_by_zero = 1'b1; // Eroare, rămânem în IDLE
-                        next_state = IDLE;
-                        // Opțional: Setează ieșiri la valori de eroare
-                        // quotient = 8'hFF;
-                        // remainder = 8'hFF;
+                        next_state = IDLE; // Rămâne în IDLE în caz de împărțire la zero
                     end else begin
-                        // Start valid: Inițializează și treci la DIVIDING
-                        next_state = DIVIDING;
+                        next_state = INIT; // Pornește procesul de împărțire
                     end
-                end else begin
-                     next_state = IDLE; // Rămânem în IDLE
                 end
-            end // case IDLE
-
+                // else: dacă nu este 'start', rămâne în IDLE (next_state = current_state)
+            end
+            INIT: begin
+                next_state = DIVIDING; // Treci la starea de împărțire
+            end
             DIVIDING: begin
-                 // Logica pentru un pas de împărțire (executată combinational)
-                 // Decizia se bazează pe p_reg din ciclul *anterior*
-                 if (p_reg[8] == 0) begin // P >= 0
-                    // Try P' = P_shifted - B
-                    q_pos_next_bit = 1'b1; // Presupunem q = +1
-                    q_neg_next_bit = 1'b0;
-                 end else begin // P < 0
-                    // Try P' = P_shifted + B
-                    q_pos_next_bit = 1'b0;
-                    q_neg_next_bit = 1'b1; // Presupunem q = -1
-                 end
-
-                 // Trecere la starea următoare (CORRECTION) după 8 pași
-                 if (count == 1'b1) begin // Ultimul pas tocmai se încheie în acest ciclu
-                     next_state = CORRECTION;
-                 end else begin
-                     next_state = DIVIDING; // Continuăm împărțirea
-                 end
-            end // case DIVIDING
-
+                // 'count' este decrementat în blocul secvențial.
+                // Dacă 'count' curent este 1, aceasta este ultima iterație de divizare.
+                // După această iterație, 'count' va deveni 0.
+                if (count == 4'd1) begin       // Ultima iterație de împărțire
+                    next_state = CORRECTION;
+                end else if (count == 4'd0) begin // Caz de siguranță (nu ar trebui atins dacă count inițial > 0)
+                    next_state = CORRECTION; 
+                end else begin
+                    next_state = DIVIDING;   // Continuă împărțirea
+                end
+            end
             CORRECTION: begin
-                 // Calculul final al câtului (Q = Qpos - Qneg) - combinational
-                 // Calculul restului corectat - combinational
-                 // Treci la starea FINISHED pentru a actualiza ieșirile
-                 next_state = FINISHED;
-            end // case CORRECTION
-
-            FINISHED: begin
-                 // Stare intermediară pentru a permite asignarea finală
-                 // și tranziția înapoi la IDLE
-                 next_state = IDLE;
-                 busy = 1'b0; // ALU devine liber
-            end // case FINISHED
-
-            default: begin
+                next_state = IDLE; // După corecție, revine la starea IDLE
+            end
+            default: begin // Stare necunoscută, revine la IDLE ca măsură de siguranță
                 next_state = IDLE;
-                busy = 1'b0;
             end
         endcase
-    end // always @(*)
+    end
 
+    // --- Calculul Valorilor Intermediare pentru p_reg și q_temp_reg (Combinational) ---
+    // Acest bloc determină valorile care vor fi încărcate în p_reg și q_temp_reg la următorul front de ceas.
+    always @(*) begin
+        // Valori implicite pentru a evita latch-uri în cazul în care condițiile nu sunt îndeplinite
+        op_result_10b  = 10'sb0; // Rezultatul operației 2P +/- B
+        p_next_val     = p_reg;      // Implicit, p_reg își păstrează valoarea
+        q_bit_next_val = 1'b0;      // Implicit, noul bit de cât este 0
 
-    // Registre și logică de actualizare (secvențială)
+        // Calculele se fac doar în starea DIVIDING și cât timp mai sunt iterații
+        if (current_state == DIVIDING && count > 0) begin
+            if (p_reg[8] == 0) begin 
+                // P curent (p_reg) este pozitiv sau zero: P_next = 2*P - B
+                op_result_10b = p_doubled_10b - b_for_calc_10b;
+            end else begin 
+                // P curent (p_reg) este negativ: P_next = 2*P + B
+                op_result_10b = p_doubled_10b + b_for_calc_10b;
+            end
+            
+            // Extrage valoarea pentru p_reg (primii N+1 biți ai rezultatului)
+            p_next_val = op_result_10b[8:0]; 
+            
+            // Determină noul bit al câtului pe baza semnului rezultatului operației (op_result_10b)
+            // q_i+1 = 1 dacă op_result_10b >= 0, altfel q_i+1 = 0.
+            // Semnul este dat de bitul MSB (op_result_10b[9]). Dacă MSB este 0, numărul e pozitiv.
+            q_bit_next_val = !op_result_10b[9]; 
+        end
+    end
+
+    // --- Actualizarea Registrelor Interne și a Ieșirilor (Secvențial) ---
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            p_reg <= 9'b0; b_reg <= 8'b0; dividend_sreg <= 8'b0;
-            q_pos_reg <= 8'b0; q_neg_reg <= 8'b0; count <= 4'b0;
-            quotient <= 8'b0; remainder <= 8'b0;
-            rem_correction_needed <= 1'b0;
-            final_rem_buffer <= 8'b0;
+            // Resetarea tuturor registrelor la valori inițiale definite
+            p_reg        <= 9'sb0; // Restul parțial inițializat la 0
+            b_reg        <= 8'b0;
+            q_temp_reg   <= 8'b0;
+            count        <= 4'd0;
+            quotient     <= 8'b0;
+            remainder    <= 8'b0;
+            internal_div_by_zero_reg <= 1'b0;
         end else begin
-            // Acțiuni bazate pe starea CURENTĂ (tranziția are loc la SFÂRȘITUL ciclului)
+            // Actualizări bazate pe starea curentă și tranzițiile definite
             case (current_state)
                 IDLE: begin
-                    if (start && divisor != 8'b0) begin // Inițializare la start valid
-                        p_reg <= 9'b0;
-                        b_reg <= divisor;
-                        dividend_sreg <= dividend;
-                        q_pos_reg <= 8'b0;
-                        q_neg_reg <= 8'b0;
-                        count <= 4'd8;
-                        rem_correction_needed <= 1'b0;
-                        final_rem_buffer <= 8'b0;
+                    if (start) begin // Acționează doar la pulsul 'start'
+                        if (divisor == 8'b0) begin
+                            internal_div_by_zero_reg <= 1'b1;
+                            quotient     <= 8'hFF; // Indică eroare pentru cât
+                            remainder    <= 8'hFF; // Indică eroare pentru rest
+                            // p_reg, b_reg, q_temp_reg, count își mențin valorile (sau cele de la reset)
+                        end else begin
+                            internal_div_by_zero_reg <= 1'b0;
+                            // Inițializare pentru o nouă operație de împărțire
+                            p_reg        <= {1'b0, dividend}; // P0 = Deîmpărțitul (A), extins la N+1 biți
+                            b_reg        <= divisor;          // Încarcă împărțitorul
+                            q_temp_reg   <= 8'b0;            // Resetează registrul temporar al câtului
+                            count        <= 4'd8;            // Setează numărul de iterații (N=8)
+                            // quotient și remainder își mențin valorile până la starea CORRECTION
+                        end
                     end
+                    // else: dacă nu este 'start', registrele își mențin valorile (cu excepția 'busy' și 'next_state' gestionate de FSM)
+                end
+
+                INIT: begin
+                    // Această stare este pentru sincronizare sau stabilizarea semnalelor.
+                    // Registrele de date (p_reg, b_reg, q_temp_reg, count) au fost setate la tranziția din IDLE.
+                    // Nu se modifică registrele de date aici.
                 end
 
                 DIVIDING: begin
-                    if (count > 0) begin
-                        // Logica Non-Restoring/SRT simplificată:
-                        if (p_reg[8] == 0) begin // P >= 0
-                           p_reg <= p_minus_b; // P_next = P_shifted - B
-                        end else begin // P < 0
-                           p_reg <= p_plus_b;  // P_next = P_shifted + B
-                        end
-
-                        // Shift Q+/Q- (folosind valorile calculate combinational)
-                        q_pos_reg <= {q_pos_reg[6:0], q_pos_next_bit};
-                        q_neg_reg <= {q_neg_reg[6:0], q_neg_next_bit};
-                        // Shift dividend
-                        dividend_sreg <= dividend_sreg << 1;
-                        // Decrement count
-                        count <= count - 1;
-
-                        // Verifică dacă restul final (după ultimul pas) va necesita corecție
-                        if (count == 1'b1) begin
-                            // Verifică semnul lui P care VA FI încărcat la următorul ceas
-                            if (p_reg[8] == 0) begin // Dacă P curent e >=0
-                                rem_correction_needed <= p_minus_b[8]; // Corecție dacă P_shifted-B < 0
-                            end else begin // Dacă P curent e < 0
-                                rem_correction_needed <= p_plus_b[8]; // Corecție dacă P_shifted+B < 0 ? Nu, corecția e necesară doar dacă P final e < 0.
-                                // Corecția SRT/Non-Restoring se face dacă P *final* e negativ
-                                // Verificăm valoarea care *va fi* în p_reg după acest ultim ciclu.
-                                //wire signed [8:0] final_p_candidate = (p_reg[8] == 0) ? p_minus_b : p_plus_b;
-				final_p_candidate = (p_reg[8] == 0) ? p_minus_b : p_plus_b;
-
-                                rem_correction_needed <= final_p_candidate[8];
-                            end
-                        end
+                    if (count > 0) begin // Se execută doar dacă mai sunt pași de împărțire
+                        p_reg      <= p_next_val;     // Actualizează restul parțial
+                        q_temp_reg <= {q_temp_reg[6:0], q_bit_next_val}; // Shiftează noul bit de cât în q_temp_reg
+                        count      <= count - 1;       // Decrementează contorul de iterații
                     end
-                end // case DIVIDING
+                end
 
                 CORRECTION: begin
-                    // Calculează și stochează restul final corectat
-                    if (rem_correction_needed) begin
-                         // Restul final P este negativ, trebuie corectat: R = P + B
-                         final_rem_buffer <= p_reg[7:0] + b_reg; // Folosim p_reg calculat în ultimul ciclu DIVIDING
-                    end else begin
-                         // Restul final P este pozitiv, este corect: R = P
-                         final_rem_buffer <= p_reg[7:0];
+                    // Corecția finală pentru rest în algoritmul non-restoring
+                    if (p_reg[8] == 1) begin // Dacă ultimul rest parțial (p_reg) este negativ
+                        remainder <= p_reg[7:0] + b_reg; // Rest final R = P + B
+                    end else begin // Dacă ultimul rest parțial (p_reg) este pozitiv sau zero
+                        remainder <= p_reg[7:0];         // Rest final R = P
                     end
-                    // Câtul final va fi calculat combinational și asignat în starea FINISHED
+                    // Pentru împărțirea non-restoring fără semn cu biți de cât {0,1},
+                    // q_temp_reg conține direct câtul final.
+                    quotient  <= q_temp_reg; 
                 end
-
-                FINISHED: begin
-                    // Atribuie valorile finale calculate în starea CORRECTION
-                    quotient <= final_quotient_internal; // Rezultatul de la q_subtractor
-                    remainder <= final_rem_buffer;    // Restul (posibil corectat)
-                end
-
-            endcase // case (current_state)
-        end // else !reset
-    end // always @(posedge clk or posedge reset)
-
+            endcase
+        end
+    end
 endmodule
